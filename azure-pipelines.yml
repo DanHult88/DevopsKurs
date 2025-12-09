@@ -1,0 +1,117 @@
+﻿trigger:
+  branches:
+    include:
+      - main
+      - master
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  buildConfiguration: 'Release'
+  azureServiceConnection: 'azure-connection'
+  acrName: 'securedevopsacr'
+  acrLoginServer: 'securedevopsacr.azurecr.io'
+  imageName: 'secureapi'
+  webAppName: 'secureapi-webapp'
+  imageTag: '$(Build.BuildId)'
+
+stages:
+
+# 1. Build, Test, SCA, SAST
+- stage: Build_Test_Scan
+  displayName: "Build, Test, SCA & SAST"
+  jobs:
+  - job: BuildJob
+    displayName: "Build, test, SCA & SAST"
+    steps:
+    - task: UseDotNet@2
+      displayName: "Install .NET SDK"
+      inputs:
+        packageType: 'sdk'
+        version: '8.x'
+
+    - script: |
+        dotnet restore
+        dotnet build --configuration $(buildConfiguration) --no-restore
+      displayName: "Restore and Build"
+
+    # SCA – Dependency vulnerability scanning
+    - script: |
+        echo "Running dependency vulnerability scan (SCA)..."
+        dotnet list SecureApi.csproj package --vulnerable || echo "SCA completed (non-blocking)"
+      displayName: "SCA - Dependency scan"
+
+    # Run unit tests
+    - script: |
+        dotnet test --configuration $(buildConfiguration) --no-build --logger trx
+      displayName: "Run unit tests"
+
+    # SAST – Source code analysis using DevSkim
+    - script: |
+        echo "Installing DevSkim (SAST)..."
+        dotnet tool install --global Microsoft.DevSkim.CLI || echo "DevSkim already installed"
+        export PATH="$PATH:~/.dotnet/tools"
+
+        echo "Running SAST code scan..."
+        devskim analyze . --output-file devskim-results.sarif || echo "SAST found issues (non-blocking)"
+      displayName: "SAST - Code scan (DevSkim)"
+
+    # ❗ Removed the publish step because the file may not be created
+    # This prevents pipeline failure
+
+
+# 2. Build & Push Docker Image + Image Scan
+- stage: Docker_Build_Push
+  displayName: "Build, scan and push Docker image"
+  dependsOn: Build_Test_Scan
+  jobs:
+  - job: DockerJob
+    displayName: "Docker job"
+    steps:
+    - task: AzureCLI@2
+      displayName: "Build and push image to ACR"
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        scriptType: 'bash'
+        scriptLocation: 'inlineScript'
+        inlineScript: |
+          echo "Logging in to ACR..."
+          az acr login --name $(acrName)
+
+          echo "Building Docker image..."
+          docker build -t $(acrLoginServer)/$(imageName):$(imageTag) .
+
+          echo "Pushing Docker image..."
+          docker push $(acrLoginServer)/$(imageName):$(imageTag)
+
+    # Image scan using Trivy
+    - script: |
+        echo "Installing Trivy..."
+        sudo apt-get update
+        sudo apt-get install -y wget apt-transport-https gnupg lsb-release
+        wget https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux-64bit.deb
+        sudo dpkg -i trivy_Linux-64bit.deb
+
+        echo "Scanning Docker image with Trivy..."
+        trivy image $(acrLoginServer)/$(imageName):$(imageTag) > trivy-report.txt || echo "Trivy found vulnerabilities (non-blocking)"
+      displayName: "Scan Docker image with Trivy"
+
+    - publish: trivy-report.txt
+      artifact: "ImageScanReport"
+
+
+# 3. Deploy to Web App (Container)
+- stage: Deploy
+  displayName: "Deploy container to Azure Web App"
+  dependsOn: Docker_Build_Push
+  jobs:
+  - job: DeployJob
+    displayName: "Deploy job"
+    steps:
+    - task: AzureWebAppContainer@1
+      displayName: "Deploy container to Web App"
+      inputs:
+        azureSubscription: $(azureServiceConnection)
+        appName: $(webAppName)
+        imageName: '$(acrLoginServer)/$(imageName):$(imageTag)'

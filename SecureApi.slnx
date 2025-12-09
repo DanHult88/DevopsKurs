@@ -1,0 +1,7 @@
+<Solution>
+  <Folder Name="/Solution Items/">
+    <File Path="azure-pipelines.yml" />
+  </Folder>
+  <Project Path="../SecureApi.Tests/SecureApi.Tests.csproj" Id="52aba20a-9c1e-484e-9b2b-6b1813b730c6" />
+  <Project Path="SecureApi.csproj" />
+</Solution>
